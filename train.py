@@ -13,30 +13,26 @@ from keras.callbacks import TensorBoard
 
 
 
-
 def model_define(args, metadata):
     P, Q = args.P, args.Q
     data_width, data_height = metadata['data_width'], metadata['data_height']
 
     X  = layers.Input(shape=(P, data_height, data_width, 1), dtype=tf.float32)
     TE  = layers.Input(shape=(P+Q, 2), dtype=tf.int32)
-    if args.model_name == 'MyARLSTM':
-        tmp_model = mymodels.MyARLSTM(args, metadata)
-        Y = tmp_model(X, TE)
-        model = keras.models.Model((X, TE), Y)
-        model_name = tmp_model.model_name
-
-    if args.model_name == 'MyConvLSTM':
-        tmp_model = mymodels.MyConvLSTM(args, metadata)
-        Y = tmp_model(X, TE)
-        model = keras.models.Model((X, TE), Y)
-        model_name = tmp_model.model_name
-        
+    
     if args.model_name == 'MyRWRModel':
         tmp_model = mymodels.MyRWRModel(args, metadata)
         Y, _, _, _, _ = tmp_model(X, TE)
+        Y =  Y * metadata['stats_std'] + metadata['stats_mean']
         model = keras.models.Model((X, TE), Y)
         model_name = tmp_model.model_name
+    else:
+        tmp_model = mymodels.str_to_class(args.model_name)(args, metadata)
+        Y = tmp_model(X, TE)
+        Y =  Y * metadata['stats_std'] + metadata['stats_mean']
+        model = keras.models.Model((X, TE), Y)
+        model_name = tmp_model.model_name
+
 
     return model, model_name
 
@@ -49,20 +45,22 @@ if __name__ == "__main__":
     parser.add_argument('--max_data_size', type=int, default=24*7*10) # history sequence
     parser.add_argument('--teacher', type=float, default=0)
     parser.add_argument('--P', type=int, default=6) # history sequence
-    parser.add_argument('--Q', type=int, default=1) # prediction sequence
+    parser.add_argument('--Q', type=int, default=6) # prediction sequence
     parser.add_argument('--S', type=int, default=1) # dataset step
-    parser.add_argument('--K', type=int, default=1) # stack of layers
     parser.add_argument('--D', type=int, default=64) # stack of layers
+    parser.add_argument('--K', type=int, default=8) # stack of layers
+    parser.add_argument('--d', type=int, default=8) # stack of layers
+    parser.add_argument('--L', type=int, default=3) # stack of layers
     
     parser.add_argument('--train_ratio', type=float, default=0.7)
     parser.add_argument('--val_ratio', type=float, default=0.1)
     parser.add_argument('--test_ratio', type=float, default=0.2)
 
-    parser.add_argument('--conv_kernel_size', type=int, default=3)
+    parser.add_argument('--conv_kernel_size', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=6)
     parser.add_argument('--max_epoch', type=int, default=100)
-    parser.add_argument('--optimizer', type=str, default=f'sgd')
-    parser.add_argument('--learning_rate', type=float, default=0.1)
+    parser.add_argument('--optimizer', type=str, default=f'adam')
+    parser.add_argument('--learning_rate', type=float, default=0.01)
     parser.add_argument('--patience_stop', type=int, default=10)
     parser.add_argument('--patience_lr', type=int, default=3)
     
@@ -82,20 +80,25 @@ if __name__ == "__main__":
 
     if args.restore_model:
         try:
-            model.load_weights(args.model_checkpoint)
+            model.load_weights(model_checkpoint)
             print('model restore successful')
         except:
             print('there exists no pretrained model')
+            import sys
+            sys.exit(0)
     
     if args.optimizer == 'sgd':
         optimizer = tf.keras.optimizers.SGD(learning_rate = args.learning_rate)
     elif args.optimizer == 'adam':
         optimizer = keras.optimizers.Adam(args.learning_rate)
+    elif args.optimizer == 'adagrad':
+        optimizer = keras.optimizers.Adagrad(args.learning_rate)
 
     model.compile(loss=custom_mae_loss, optimizer=optimizer)
+    # model.compile(loss=custom_mse_loss, optimizer=optimizer)
 
     # Define some callbacks to improve training.
-    early_stopping = keras.callbacks.EarlyStopping(monitor="val_loss", patience=args.patience_stop)
+    early_stopping = keras.callbacks.EarlyStopping(monitor="val_loss", patience=args.patience_stop, min_delta=1e-6)
     reduce_lr = keras.callbacks.ReduceLROnPlateau(monitor="val_loss", patience=args.patience_lr)
     model_ckpt = tf.keras.callbacks.ModelCheckpoint(model_checkpoint, save_weights_only=True, \
                     save_best_only=True, monitor='val_loss', mode='min', verbose=0)
@@ -118,7 +121,14 @@ if __name__ == "__main__":
                 callbacks=[early_stopping, model_ckpt, reduce_lr, tb_callback],
     )
 
-    predY = model.predict((testX, testTE), batch_size=1) * 10000
-    labelY = testY * 10000
+    # model, model_name = model_define(args, metadata)
+    # model.load_weights(args.model_checkpoint)
+
+    predY = model.predict((testX, testTE), batch_size=1)
+    labelY = testY
+
+    np.save(f'prediction/pred_{args.model_name}.npy', predY)
+    np.save(f'prediction/ground_truth.npy', labelY)
     print(f'{args.model_name} test result:', metric(labelY, predY))
     
+ 
